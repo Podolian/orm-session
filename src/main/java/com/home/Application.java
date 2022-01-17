@@ -25,7 +25,7 @@ public class Application {
     private static void checkFind(Session session) {
         Hit hit = session.find(Hit.class, 1L);
         System.out.println(hit);
-        Hit anotherHit = session.find(Hit.class, 2L);
+        Hit anotherHit = session.find(Hit.class, 1L);
         System.out.println(anotherHit);
 
         System.out.println(hit == anotherHit);

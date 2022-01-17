@@ -14,6 +14,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @RequiredArgsConstructor
@@ -24,7 +25,7 @@ public class Session {
 
     public <T> T find(Class<T> type, Object id) {
         EntityKey<T> entityKey = new EntityKey<>(type, id);
-        Object entity = lookupCache.computeIfAbsent(entityKey, this::findInDb);
+        Object entity = lookupCache.computeIfAbsent(entityKey, this::searchInDb);
         return type.cast(entity);
     }
 
@@ -37,9 +38,11 @@ public class Session {
     @SneakyThrows
     private void performUpdate(Map.Entry<EntityKey<?>, Object> entry) {
         try (Connection connection = dataSource.getConnection()) {
-            String updateSql = "update " + entry.getValue().getClass().getDeclaredAnnotation(Table.class).name() + " set "
-                    + getUpdateFields(entry.getValue()) + " where id = ?";
-            System.out.println(updateSql);
+            String updateSql = String.format("update %s set %s where id = ?",
+                    entry.getValue().getClass().getDeclaredAnnotation(Table.class).name(),
+                    getUpdateFields(entry.getValue())
+            );
+            System.out.println("SQL: " + updateSql);
             try (PreparedStatement preparedStatement = connection.prepareStatement(updateSql)) {
                 preparedStatement.setObject(1, entry.getKey().id());
                 preparedStatement.executeUpdate();
@@ -49,30 +52,28 @@ public class Session {
 
     private String getUpdateFields(Object entity) {
         return Arrays.stream(entity.getClass().getDeclaredFields())
-                .map(field -> {
-                    try {
-                        field.setAccessible(true);
-                        return field.getName() + "= '" + field.get(entity) + "'";
-                    } catch (IllegalAccessException e) {
-                        e.printStackTrace();
-                    }
-                    return null;
-                })
+                .peek(f -> f.setAccessible(true))
+                .map(extractQueryPartFromField(entity))
                 .collect(Collectors.joining(", "));
+    }
+
+    private Function<Field, String> extractQueryPartFromField(Object entity) {
+        return field -> {
+            try {
+                return field.getName() + "= '" + field.get(entity) + "'";
+            } catch (IllegalAccessException e) {
+                e.printStackTrace();
+                return null;
+            }
+        };
     }
 
     private boolean entryHasChanged(Map.Entry<EntityKey<?>, Object> entry) {
         Object[] initialFields = this.initialStateCache.get(entry.getKey());
         Object[] fieldUnderTest = Arrays.stream(entry.getValue().getClass().getDeclaredFields())
                 .sorted(Comparator.comparing(Field::getName))
-                .map(f -> {f.setAccessible(true);
-                    try {
-                        return f.get(entry.getValue());
-                    } catch (IllegalAccessException e) {
-                        e.printStackTrace();
-                    }
-                    return null;
-                })
+                .peek(f -> f.setAccessible(true))
+                .map(extractFieldValue(entry))
                 .toArray();
         for (int i = 0; i < initialFields.length; i++) {
             if (!initialFields[i].equals(fieldUnderTest[i])) {
@@ -82,8 +83,19 @@ public class Session {
         return false;
     }
 
+    private Function<Field, Object> extractFieldValue(Map.Entry<EntityKey<?>, Object> entry) {
+        return f -> {
+            try {
+                return f.get(entry.getValue());
+            } catch (IllegalAccessException e) {
+                e.printStackTrace();
+            }
+            return null;
+        };
+    }
+
     @SneakyThrows
-    private <T> T findInDb(EntityKey<T> entityKey) {
+    private <T> T searchInDb(EntityKey<T> entityKey) {
         try (Connection connection = dataSource.getConnection()) {
             Class<T> entityType = entityKey.type();
             String preparedSql = prepareSelectSQL(entityType);
