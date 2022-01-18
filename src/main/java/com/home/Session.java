@@ -7,14 +7,12 @@ import lombok.SneakyThrows;
 
 import javax.sql.DataSource;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -55,16 +53,19 @@ public class Session {
         return Arrays.stream(entity.getClass().getDeclaredFields())
                 .peek(f -> f.setAccessible(true))
                 .map(extractQueryPartFromField(entity))
+                .filter(Optional::isPresent)
+                .map(Optional::get)
                 .collect(Collectors.joining(", "));
     }
 
-    private Function<Field, String> extractQueryPartFromField(Object entity) {
+    private Function<Field, Optional<String>> extractQueryPartFromField(Object entity) {
         return field -> {
             try {
-                return field.getName() + "= '" + field.get(entity) + "'";
+                String queryPart = field.getName() + "= '" + field.get(entity) + "'";
+                return Optional.of(queryPart);
             } catch (IllegalAccessException e) {
                 e.printStackTrace();
-                return null;
+                return Optional.empty();
             }
         };
     }
@@ -88,14 +89,14 @@ public class Session {
                 .toArray();
     }
 
-    private Function<Field, Object> extractFieldValue(Object entity) {
+    private Function<Field, Optional<?>> extractFieldValue(Object entity) {
         return f -> {
             try {
-                return f.get(entity);
+                return Optional.of(f.get(entity));
             } catch (IllegalAccessException e) {
                 e.printStackTrace();
+                return Optional.empty();
             }
-            return null;
         };
     }
 
@@ -108,8 +109,7 @@ public class Session {
                 preparedStatement.setObject(1, entityKey.id());
                 System.out.println("SQL: " + preparedStatement);
                 ResultSet resultSet = preparedStatement.executeQuery();
-                T entity = createEntityFrom(entityKey, resultSet);
-                return entity;
+                return createEntityFrom(entityKey, resultSet);
             }
         }
     }
@@ -121,21 +121,21 @@ public class Session {
         Field[] declaredFields = Arrays.stream(type.getDeclaredFields())
                 .sorted(Comparator.comparing(Field::getName))
                 .toArray(Field[]::new);
-        T entity = type.getConstructor().newInstance();
-        fillFields(resultSet, declaredFields, entity);
-        T snapshot = type.getConstructor().newInstance();
-        fillFields(resultSet, declaredFields, snapshot);
+        T entity = fillFields(resultSet, declaredFields, type);
+        T snapshot = fillFields(resultSet, declaredFields, type);
         initialStateCache.put(entityKey, snapshot);
         return entity;
     }
 
-    private <T> void fillFields(ResultSet resultSet, Field[] declaredFields, T entity) throws SQLException, IllegalAccessException {
+    private <T> T fillFields(ResultSet resultSet, Field[] declaredFields, Class<T> type) throws Exception {
+        T entity = type.getConstructor().newInstance();
         for (Field field : declaredFields) {
             String columnName = field.getDeclaredAnnotation(Column.class).name();
             field.setAccessible(true);
             Object fieldValue = resultSet.getObject(columnName);
             field.set(entity, fieldValue);
         }
+        return entity;
     }
 
     private String prepareSelectSQL(Class<?> type) {
