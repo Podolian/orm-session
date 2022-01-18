@@ -10,6 +10,7 @@ import java.lang.reflect.Field;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -20,8 +21,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class Session {
     private final DataSource dataSource;
-    private Map<EntityKey<?>, Object> lookupCache = new HashMap<>();
-    private Map<EntityKey<?>, Object[]> initialStateCache = new HashMap<>();
+    private final Map<EntityKey<?>, Object> lookupCache = new HashMap<>();
+    private final Map<EntityKey<?>, Object> initialStateCache = new HashMap<>();
 
     public <T> T find(Class<T> type, Object id) {
         EntityKey<T> entityKey = new EntityKey<>(type, id);
@@ -69,24 +70,28 @@ public class Session {
     }
 
     private boolean entryHasChanged(Map.Entry<EntityKey<?>, Object> entry) {
-        Object[] initialFields = this.initialStateCache.get(entry.getKey());
-        Object[] fieldUnderTest = Arrays.stream(entry.getValue().getClass().getDeclaredFields())
-                .sorted(Comparator.comparing(Field::getName))
-                .peek(f -> f.setAccessible(true))
-                .map(extractFieldValue(entry))
-                .toArray();
+        Object[] initialFields = extractFields(this.initialStateCache.get(entry.getKey()));
+        Object[] fieldsToTestForChanges = extractFields(entry.getValue());
         for (int i = 0; i < initialFields.length; i++) {
-            if (!initialFields[i].equals(fieldUnderTest[i])) {
+            if (!fieldsToTestForChanges[i].equals(initialFields[i])) {
                 return true;
             }
         }
         return false;
     }
 
-    private Function<Field, Object> extractFieldValue(Map.Entry<EntityKey<?>, Object> entry) {
+    private Object[] extractFields(Object entity) {
+        return Arrays.stream(entity.getClass().getDeclaredFields())
+                .sorted(Comparator.comparing(Field::getName))
+                .peek(f -> f.setAccessible(true))
+                .map(extractFieldValue(entity))
+                .toArray();
+    }
+
+    private Function<Field, Object> extractFieldValue(Object entity) {
         return f -> {
             try {
-                return f.get(entry.getValue());
+                return f.get(entity);
             } catch (IllegalAccessException e) {
                 e.printStackTrace();
             }
@@ -116,18 +121,21 @@ public class Session {
         Field[] declaredFields = Arrays.stream(type.getDeclaredFields())
                 .sorted(Comparator.comparing(Field::getName))
                 .toArray(Field[]::new);
-        Object[] snapshotCopy = new Object[declaredFields.length];
         T entity = type.getConstructor().newInstance();
-        for (int i = 0; i < declaredFields.length; i++) {
-            Field field = declaredFields[i];
+        fillFields(resultSet, declaredFields, entity);
+        T snapshot = type.getConstructor().newInstance();
+        fillFields(resultSet, declaredFields, snapshot);
+        initialStateCache.put(entityKey, snapshot);
+        return entity;
+    }
+
+    private <T> void fillFields(ResultSet resultSet, Field[] declaredFields, T entity) throws SQLException, IllegalAccessException {
+        for (Field field : declaredFields) {
             String columnName = field.getDeclaredAnnotation(Column.class).name();
             field.setAccessible(true);
             Object fieldValue = resultSet.getObject(columnName);
             field.set(entity, fieldValue);
-            snapshotCopy[i] = fieldValue;
         }
-        initialStateCache.put(entityKey, snapshotCopy);
-        return entity;
     }
 
     private String prepareSelectSQL(Class<?> type) {
